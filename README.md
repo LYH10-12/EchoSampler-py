@@ -17,4 +17,4 @@ Inspired by entropy-aware sampling research (Entropix et al.) and born from a pl
 
 ## Installation
 ```bash
-pip install git+https://github.com/YOUR_USERNAME/EchoSampler.git
+pip install git+https://github.com/LYH10-12/EchoSampler-py.git
