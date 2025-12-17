@@ -1,0 +1,79 @@
+# Python 字节码和缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 虚拟环境
+venv/
+env/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# PyCharm / VSCode / IDE 配置
+.idea/
+.vscode/
+*.sublime-workspace
+*.sublime-project
+
+# Jupyter Notebook 检查点
+.ipynb_checkpoints
+
+# 打包和分发
+build/
+dist/
+*.egg
+*.egg-info/
+.eggs/
+wheels/
+*.whl
+
+# setuptools / pyproject 缓存
+.coverage
+htmlcov/
+.tox/
+.nox/
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+
+# pytest 缓存
+.pytest_cache/
+.hypothesis/
+
+# mypy 缓存
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ruff / black 等工具缓存
+.ruff_cache/
+
+# Mac 系统文件
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# 如果以后加测试数据或大模型权重（一般不会，但防一手）
+*.pt
+*.pth
+*.bin
+*.safetensors
+data/
+models/
+
+# 日志和临时文件
+*.log
+tmp/
+temp/
