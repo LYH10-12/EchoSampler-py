@@ -1,0 +1,15 @@
+```toml
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "echosampler"
+version = "0.1.0"
+description = "Entropy-Echo Guided Adaptive Sampling"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = ["torch"]
+
+[project.urls]
+Homepage = "https://github.com/LYH10-12/EchoSampler-py"
