@@ -11,9 +11,13 @@ Inspired by entropy-aware sampling research (Entropix et al.) and born from a pl
 
 ## Features
 - Pure PyTorch, no extra dependencies
+ - Pure PyTorch, Hugging Face `transformers` required for the LogitsProcessor integration
 - Batch-compatible & gradient-safe
 - Configurable parameters
 - <30 lines core code – extreme minimalism
+
+Note: The package now exposes an HF-compatible `LogitsProcessor` implementation (`EchoSamplerProcessor`).
+If you plan to integrate with Hugging Face's `generate()` API, install `transformers` in addition to `torch`.
 
 ## Installation
 ```bash
