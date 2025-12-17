@@ -9,6 +9,7 @@ description = "Entropy-Echo Guided Adaptive Sampling"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = ["torch"]
+dependencies = ["torch", "transformers"]
 
 [project.urls]
 Homepage = "https://github.com/LYH10-12/EchoSampler-py"
