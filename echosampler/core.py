@@ -1,33 +1,49 @@
 import torch
+from transformers import LogitsProcessor
 
-class EchoSampler:
+class EchoSamplerProcessor(LogitsProcessor):
     """
-    EchoSampler: Entropy-Echo Guided Adaptive Sampling
+    EchoSampler: Entropy-Echo Guided Adaptive Sampling as a LogitsProcessor
     
     A minimalist adaptive sampler using entropy and varentropy feedback
     to dynamically adjust temperature and noise for dual-mode generation:
     - Reality Mode: High entropy → higher temp for exploration (reasoning/math)
     - Dream Mode: Low entropy → lower temp + tiny noise for long coherent chains (creative/story)
     
-    Inspired by late-night chats and recent entropy-aware sampling research.
+    This version is implemented as a Hugging Face Transformers LogitsProcessor for efficient integration
+    into the generate() pipeline. It modifies logits in-place per step, avoiding stepwise overhead.
+    
+    Usage example:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    model = AutoModelForCausalLM.from_pretrained("gpt2")
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    processor = EchoSamplerProcessor(config=None, dream_mode=True)
+    inputs = tokenizer("Hello, world!", return_tensors="pt")
+    outputs = model.generate(**inputs, logits_processor=[processor], do_sample=True, max_length=50)
     """
     
-    def __init__(self, config=None, dream_mode=False):
+    def __init__(self, config=None, dream_mode=False, vocab_size=None):
         if config is None:
             config = {
                 'reality': {'min_temp': 0.9, 'max_temp': 1.0, 'ent_coeff': 0.2},
                 'dream': {'min_temp': 0.35, 'max_temp': 0.45, 'ent_coeff': -0.3,
-                          'varent_coeff': 0.1, 'noise_std': 0.05},
+                          'varent_coeff': 0.1, 'noise_std_base': 0.05},
                 'low_ent_thres': 1.5,
                 'low_varent_thres': 1.2
             }
         self.config = config
         self.dream_mode = dream_mode
+        # For adaptive thresholds: if vocab_size provided (e.g., from tokenizer), normalize thresholds
+        self.vocab_size = vocab_size
+        if self.vocab_size:
+            # Scale thresholds roughly with log(vocab) for larger models
+            scale = torch.log(torch.tensor(self.vocab_size)) / torch.log(torch.tensor(50000))  # Normalize to ~GPT-2 vocab
+            self.config['low_ent_thres'] *= scale.item()
+            self.config['low_varent_thres'] *= scale.item()
 
-    def sample(self, logits):
-        logits = logits.detach()
-        if logits.dim() == 1:
-            logits = logits.unsqueeze(0)
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        # scores are logits (batch_size, vocab_size)
+        logits = scores.detach()  # Avoid in-place if needed, but we'll modify a copy
         
         softmax = torch.softmax(logits, dim=-1)
         log_softmax = torch.log_softmax(logits, dim=-1)
@@ -35,28 +51,28 @@ class EchoSampler:
         # Entropy (mean over batch)
         ent = -(softmax * log_softmax).sum(-1).mean(0)
         
-        # Varentropy (inspired by Entropix)
-        diff = log_softmax + ent.unsqueeze(-1)
+        # Varentropy
+        diff = log_softmax + ent.unsqueeze(-1) if logits.dim() > 1 else log_softmax + ent
         varent = (softmax * diff ** 2).sum(-1).mean(0)
         
         if self.dream_mode:
             temp_base = self.config['dream']['max_temp'] + self.config['dream']['ent_coeff'] * ent
             temp_adjust = self.config['dream']['varent_coeff'] * varent
-            temp = torch.clamp(temp_base + temp_adjust, min=self.config['dream']['min_temp'])
-            noise = (self.config['dream']['noise_std'] * torch.randn_like(logits)
-                     if varent > self.config['low_varent_thres'] else 0.0)
+            temp = torch.clamp(temp_base + temp_adjust, 
+                               min=self.config['dream']['min_temp'], 
+                               max=self.config['dream']['max_temp'])  # Added max clamp as suggested
+            # Scale noise strength with varent for smoother perturbation
+            noise_std = self.config['dream']['noise_std_base'] * (varent / self.config['low_varent_thres'])
+            noise = (noise_std * torch.randn_like(logits)
+                     if varent > self.config['low_varent_thres'] else torch.zeros_like(logits))
             logits = logits / temp + noise
         else:
             temp_base = self.config['reality']['min_temp'] + self.config['reality']['ent_coeff'] * ent
-            temp = torch.clamp(temp_base, max=self.config['reality']['max_temp'])
+            temp = torch.clamp(temp_base, 
+                               min=self.config['reality']['min_temp'], 
+                               max=self.config['reality']['max_temp'])  # Ensure min clamp too
             if varent < self.config['low_varent_thres']:
                 temp *= 0.8
             logits = logits / temp
         
-        probs = torch.softmax(logits, dim=-1)
-        return torch.multinomial(probs, 1)
-
-# Convenience function
-def echo_sample(logits, dream_mode=False, config=None):
-    sampler = EchoSampler(config=config, dream_mode=dream_mode)
-    return sampler.sample(logits)
+        return logits  # Return modified logits for sampling
