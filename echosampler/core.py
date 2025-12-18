@@ -5,21 +5,8 @@ class EchoSamplerProcessor(LogitsProcessor):
     """
     EchoSampler: Entropy-Echo Guided Adaptive Sampling as a LogitsProcessor
     
-    A minimalist adaptive sampler using entropy and varentropy feedback
-    to dynamically adjust temperature and noise for dual-mode generation:
-    - Reality Mode: High entropy → higher temp for exploration (reasoning/math)
-    - Dream Mode: Low entropy → lower temp + tiny noise for long coherent chains (creative/story)
-    
-    This version is implemented as a Hugging Face Transformers LogitsProcessor for efficient integration
-    into the generate() pipeline. It modifies logits in-place per step, avoiding stepwise overhead.
-    
-    Usage example:
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    model = AutoModelForCausalLM.from_pretrained("gpt2")
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
-    processor = EchoSamplerProcessor(config=None, dream_mode=True)
-    inputs = tokenizer("Hello, world!", return_tensors="pt")
-    outputs = model.generate(**inputs, logits_processor=[processor], do_sample=True, max_length=50)
+    更新：1. 充分利用 varent_coeff 来细腻控制噪声强度
+          2. 用移动平均平滑 ent 和 varent，避免单步波动
     """
     
     def __init__(self, config=None, dream_mode=False, vocab_size=None):
@@ -33,57 +20,69 @@ class EchoSamplerProcessor(LogitsProcessor):
             }
         self.config = config
         self.dream_mode = dream_mode
-        # For adaptive thresholds: if vocab_size provided (e.g., from tokenizer), normalize thresholds
+        # For adaptive thresholds
         self.vocab_size = vocab_size
         if self.vocab_size:
-            # Scale thresholds roughly with log(vocab) for larger models
-            scale = torch.log(torch.tensor(self.vocab_size)) / torch.log(torch.tensor(50000))  # Normalize to ~GPT-2 vocab
+            scale = torch.log(torch.tensor(self.vocab_size)) / torch.log(torch.tensor(50000))
             self.config['low_ent_thres'] *= scale.item()
             self.config['low_varent_thres'] *= scale.item()
         
-        # Add optional typical warper for hybrid safety
+        # Typical warper for safety
         self.typical_warper = TypicalLogitsWarper(mass=0.9) if dream_mode else None
+        
+        # 新增：用于平滑的变量
+        self.prev_ent = None
+        self.prev_varent = None
+        self.alpha = 0.7  # 平滑系数（0~1，越高越保留历史，越稳）
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        # scores are logits (batch_size, vocab_size)
-        logits = scores.detach()  # Avoid in-place if needed, but we'll modify a copy
+        logits = scores.clone()  # 安全起见 clone
         
         softmax = torch.softmax(logits, dim=-1)
         log_softmax = torch.log_softmax(logits, dim=-1)
         
-        # Entropy (mean over batch)
+        # Entropy
         ent = -(softmax * log_softmax).sum(-1).mean(0)
         
         # Varentropy
-        diff = log_softmax + ent.unsqueeze(-1) if logits.dim() > 1 else log_softmax + ent
+        diff = log_softmax + ent.unsqueeze(-1)
         varent = (softmax * diff ** 2).sum(-1).mean(0)
         
+        # 新增：指数移动平均平滑
+        if self.prev_ent is None:
+            smooth_ent = ent
+            smooth_varent = varent
+        else:
+            smooth_ent = self.alpha * self.prev_ent + (1 - self.alpha) * ent
+            smooth_varent = self.alpha * self.prev_varent + (1 - self.alpha) * varent
+        self.prev_ent = smooth_ent.detach()
+        self.prev_varent = smooth_varent.detach()
+        
         if self.dream_mode:
-            # Fixed: Positive feedback for entropy, clamp to safer range
-            temp_base = 0.8  # Safer baseline
-            temp_adjust = self.config['dream']['ent_coeff'] * (ent - self.config['dream']['target_ent'])
+            # 温度调整（用平滑后的 ent）
+            temp_base = 0.8
+            temp_adjust = self.config['dream']['ent_coeff'] * (smooth_ent - self.config['dream']['target_ent'])
             temp = torch.clamp(temp_base + temp_adjust, 
                                min=self.config['dream']['min_temp'], 
                                max=self.config['dream']['max_temp'])
             
-            # Fixed: Add noise when varent HIGH (uncertain distributions)
-            if varent > self.config['low_varent_thres']:
-                noise_std = self.config['dream']['noise_std_base'] * (varent / self.config['low_varent_thres'])
-            else:
-                noise_std = 0.0
+            # 新增：varent_coeff 正式上场，噪声强度更细腻
+            noise_std = self.config['dream']['noise_std_base'] * self.config['dream']['varent_coeff'] * smooth_varent
+            noise_std = torch.clamp(noise_std, min=0.0)
+            
             noise = noise_std * torch.randn_like(logits)
             logits = logits / temp + noise
             
-            # Add hybrid typical filtering to prevent collapse
+            # Typical filtering
             if self.typical_warper:
                 logits = self.typical_warper(input_ids, logits)
         else:
-            temp_base = self.config['reality']['min_temp'] + self.config['reality']['ent_coeff'] * ent
+            temp_base = self.config['reality']['min_temp'] + self.config['reality']['ent_coeff'] * smooth_ent
             temp = torch.clamp(temp_base, 
                                min=self.config['reality']['min_temp'], 
                                max=self.config['reality']['max_temp'])
-            if varent < self.config['low_varent_thres']:
+            if smooth_varent < self.config['low_varent_thres']:
                 temp *= 0.8
             logits = logits / temp
         
-        return logits  # Return modified logits for sampling
+        return logits
