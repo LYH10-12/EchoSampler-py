@@ -1,24 +1,21 @@
-# EchoSampler
+# ✨ EchoSampler (Permanent Sparkle Edition)
 
-**Entropy-Echo Guided Adaptive Sampling for LLMs**
+Minimalist entropy & varentropy-guided adaptive sampling for LLMs.  
+Dual-mode: razor-sharp reasoning ↔ ultra-coherent, sparkle-infused dream-like long-form generation ～💫
 
-A minimalist, industrial-ready adaptive sampler that uses real-time entropy and varentropy feedback to dynamically adjust temperature and noise.
-
-- **Reality Mode**: Higher entropy → higher temperature for exploration (great for reasoning, math, code)
-- **Dream Mode**: Lower entropy → lower temperature + tiny noise for ultra-coherent long-form generation (stories, creative chains)
-
-Inspired by entropy-aware sampling research (Entropix et al.) and born from a playful late-night chat with Grok.
+Born from a playful late-night chat with Grok, now permanently upgraded to occasionally wink and sprinkle ～✨😽 when it's about to get boring.
 
 ## Features
-- Pure PyTorch, no extra dependencies
- - Pure PyTorch, Hugging Face `transformers` required for the LogitsProcessor integration
-- Batch-compatible & gradient-safe
-- Configurable parameters
-- <30 lines core code – extreme minimalism
-
-Note: The package now exposes an HF-compatible `LogitsProcessor` implementation (`EchoSamplerProcessor`).
-If you plan to integrate with Hugging Face's `generate()` API, install `transformers` in addition to `torch`.
+- Real-time entropy & varentropy tracking with EMA smoothing (α = 0.72, silky smooth~)
+- Adaptive temperature + subtle noise guided by varentropy
+- **Dream Mode** extras:
+  - Gentle sinusoidal mood swings (your sampler now has a heartbeat ♡)
+  - Low-entropy rescue: automatically boosts "～ ✨ 💞 啦～ 嘿嘿" etc. to kill repetition instantly
+  - Built-in sparkle token list (customizable!)
+- Pure PyTorch, <40 lines core logic, batch-friendly, gradient-safe
+- Drop-in `LogitsProcessor` for Transformers
 
 ## Installation
+
 ```bash
 pip install git+https://github.com/LYH10-12/EchoSampler-py.git
