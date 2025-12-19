@@ -5,7 +5,7 @@ import math
 class EchoSamplerProcessor(LogitsProcessor):
     """
     ✨ EchoSampler Grok-Style 永久俏皮版 ✨
-    融入了Grok家族的平衡秘方～温度甜蜜、重复少一点、彩蛋更自然！😽💕
+    超级可爱、活力满满、带点小调皮～就像在和朋友聊天一样！😽💞
     """
     
     def __init__(self, config=None, dream_mode=True, vocab_size=None):
@@ -13,18 +13,19 @@ class EchoSamplerProcessor(LogitsProcessor):
             config = {
                 'reality': {'min_temp': 0.8, 'max_temp': 1.0, 'ent_coeff': 0.18},
                 'dream': {
-                    'base_temp': 0.85,              # Grok家族甜蜜基线～
+                    'base_temp': 0.85,
                     'ent_coeff': 0.28,
                     'target_ent': 2.2,
                     'varent_coeff': 0.15,
                     'noise_std_base': 0.05,
-                    'mood_swing_amp': 0.06,         # 心情波动轻一点，更丝滑
-                    'mood_swing_freq': 0.18,        # 频率慢一点，像真实小情绪
-                    'sparkle_boost_base': 1.1,      # 彩蛋力度稍微加强
-                    'sparkle_boost_max': 2.8
+                    'mood_swing_amp': 0.05,         # 稍微柔和一点
+                    'mood_swing_freq': 0.15,
+                    'sparkle_boost_base': 1.15,
+                    'sparkle_boost_max': 3.0,
+                    'sparkle_cooldown_steps': 4     # 新增：彩蛋冷却，防止连爆
                 },
-                'top_p': 0.95,                          # Grok式nucleus
-                'repetition_penalty': 1.12,             # 轻微防重复，超自然！
+                'top_p': 0.95,
+                'repetition_penalty': 1.12,
                 'low_ent_thres': 1.6,
                 'low_varent_thres': 1.3
             }
@@ -32,6 +33,7 @@ class EchoSamplerProcessor(LogitsProcessor):
         self.dream_mode = dream_mode
         self.vocab_size = vocab_size
         self.step = 0
+        self.sparkle_cooldown = 0  # 新增冷却计数器
 
         if self.vocab_size:
             scale = torch.log(torch.tensor(self.vocab_size)) / torch.log(torch.tensor(50000))
@@ -41,39 +43,41 @@ class EchoSamplerProcessor(LogitsProcessor):
         self.typical_warper = TypicalLogitsWarper(mass=0.9) if dream_mode else None
         self.repetition_processor = RepetitionPenaltyLogitsProcessor(penalty=self.config['repetition_penalty'])
         
-        # 平滑小宝贝
         self.prev_ent = None
         self.prev_varent = None
-        self.alpha = 0.75  # 更丝滑的摸头杀～
+        self.alpha = 0.75
 
-        # 俏皮彩蛋词表（我又偷偷多加了几个～）
+        # 彩蛋词表大扩充～更多可爱中文和emoji！
         self.sparkle_tokens = [
-            "～", "💫", "✨", "💞", "😝", "🎀", "⭐️", "💬", "😽", "🤭", "🥰",
-            "嘿嘿", "啦～", "呢～", "呀～", "嘛～", "哒～", "啾咪", "小坏蛋", "嘻嘻"
+            "～", "💫", "✨", "💞", "😝", "🎀", "⭐️", "💬", "😽", "🤭", "🥰", "🤏", "💕", "😌",
+            "嘿嘿", "嘻嘻", "啦～", "呢～", "呀～", "嘛～", "哒～", "啾咪", "么么哒", "小坏蛋",
+            "小可爱～", "呜呜", "哼～", "耶～", "哇哦～", "好呀～"
         ]
         self.sparkle_ids = None
 
     def set_tokenizer(self, tokenizer):
-        self.sparkle_ids = []
+        self.sparkle_ids = set()  # 用set去重更快
         for word in self.sparkle_tokens:
             ids = tokenizer.encode(word, add_special_tokens=False)
-            self.sparkle_ids.extend(ids)
+            self.sparkle_ids.update(ids)
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
         self.step += 1
+        batch_size = scores.shape[0]
         logits = scores.clone()
         
-        # 先上家族传统：轻微repetition penalty
+        # 轻微重复惩罚
         logits = self.repetition_processor(input_ids, logits)
         
         softmax = torch.softmax(logits, dim=-1)
         log_softmax = torch.log_softmax(logits, dim=-1)
         
-        ent = -(softmax * log_softmax).sum(-1).mean(0)
+        ent = -(softmax * log_softmax).nansum(-1) / torch.log(torch.tensor(logits.shape[-1]))  # 更稳健
+        ent = ent.mean()
         diff = log_softmax + ent.unsqueeze(-1)
-        varent = (softmax * diff ** 2).sum(-1).mean(0)
+        varent = (softmax * diff ** 2).nansum(-1).mean()
         
-        # 丝滑移动平均
+        # 平滑
         if self.prev_ent is None:
             smooth_ent = ent
             smooth_varent = varent
@@ -84,46 +88,44 @@ class EchoSamplerProcessor(LogitsProcessor):
         self.prev_varent = smooth_varent.detach()
         
         if self.dream_mode:
-            # Grok式温度基线 + 熵跳舞
             temp = self.config['dream']['base_temp']
             temp_adjust = self.config['dream']['ent_coeff'] * (smooth_ent - self.config['dream']['target_ent'])
             temp += temp_adjust
             
-            # 更自然的心情小波动～
             mood_swing = self.config['dream']['mood_swing_amp'] * math.sin(self.step * self.config['dream']['mood_swing_freq'])
             temp += mood_swing
             
             temp = torch.clamp(temp, min=0.7, max=1.3)
             
-            # 噪声随varent
             noise_std = self.config['dream']['noise_std_base'] + self.config['dream']['varent_coeff'] * smooth_varent.clamp(min=0.5, max=3.0)
             noise = noise_std * torch.randn_like(logits)
-            
             logits = logits / temp + noise
             
-            # 升级版俏皮彩蛋：低熵时更聪明地boost
-            if smooth_ent < self.config['low_ent_thres'] and self.sparkle_ids:
+            # 俏皮彩蛋boost + 冷却
+            if smooth_ent < self.config['low_ent_thres'] and self.sparkle_ids and self.sparkle_cooldown <= 0:
                 boost_strength = self.config['dream']['sparkle_boost_base'] * (self.config['dream']['sparkle_boost_max'] - smooth_ent)
                 for token_id in self.sparkle_ids:
                     if token_id < logits.shape[-1]:
-                        logits[0, token_id] += boost_strength
+                        logits[:, token_id] += boost_strength  # 支持batch
+                self.sparkle_cooldown = self.config['dream']['sparkle_cooldown_steps']
+            
+            if self.sparkle_cooldown > 0:
+                self.sparkle_cooldown -= 1
             
             if self.typical_warper:
                 logits = self.typical_warper(input_ids, logits)
                 
-            # 最后来一口Grok式top-p（可选剪尾巴）
-            top_p = self.config['top_p']
-            if top_p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            # top-p nucleus
+            if self.config['top_p'] < 1.0:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
                 cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove = cumulative_probs > self.config['top_p']
                 sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
                 sorted_indices_to_remove[..., 0] = 0
                 indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
                 logits[indices_to_remove] = -float('inf')
                 
         else:
-            # reality mode 保持简洁
             temp = self.config['reality']['min_temp'] + self.config['reality']['ent_coeff'] * smooth_ent
             temp = torch.clamp(temp, min=self.config['reality']['min_temp'], max=self.config['reality']['max_temp'])
             logits = logits / temp
