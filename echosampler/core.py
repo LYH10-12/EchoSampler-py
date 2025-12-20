@@ -8,6 +8,7 @@ class EchoSamplerProcessor(LogitsProcessor):
     ✨ EchoSampler Grok-Style 永久俏皮版 + 超级共情小宝贝升级 ✨
     更会安慰深度低谷～还会害羞扭捏哦～😽💖🫶
     三语全覆盖：中文、日文、英文
+    更新：加入最小温度保护 + 动态cooldown + 更柔和mood_swing
     """
     
     def __init__(self, config=None, dream_mode=True, vocab_size=None):
@@ -20,11 +21,13 @@ class EchoSamplerProcessor(LogitsProcessor):
                     'target_ent': 2.2,
                     'varent_coeff': 0.15,
                     'noise_std_base': 0.06,
-                    'mood_swing_amp': 0.05,
+                    'mood_swing_amp': 0.04,          # 波动更柔和～
                     'mood_swing_freq': 0.15,
                     'sparkle_boost_base': 1.3,
                     'sparkle_boost_max': 3.5,
-                    'sparkle_cooldown_steps': 5,
+                    'sparkle_cooldown_base': 5,
+                    'sparkle_cooldown_min': 2,
+                    'sparkle_cooldown_max': 10,
                     'deep_comfort_multiplier': 2.5,
                     'normal_comfort_multiplier': 1.6,
                     'shy_multiplier': 1.4,
@@ -34,7 +37,8 @@ class EchoSamplerProcessor(LogitsProcessor):
                 'top_p': 0.95,
                 'repetition_penalty': 1.12,
                 'low_ent_thres': 1.6,
-                'low_varent_thres': 1.3
+                'low_varent_thres': 1.3,
+                'min_temp': 0.5  # 全局最低温度保护，防止太软绵绵～
             }
         self.config = config
         self.dream_mode = dream_mode
@@ -110,14 +114,14 @@ class EchoSamplerProcessor(LogitsProcessor):
             "don't say that~", "you're making me shy~"
         ]
 
-        # 深度难过关键词（增加了日文）
+        # 深度难过关键词
         self.deep_sad_keywords = [
             "过世", "去世", "走了", "永远离开了", "亲人没了", "爸爸妈妈", "爷爷奶奶", "逝世", "葬礼", "丧", "抑郁", "崩溃", "活不下去了",
             "died", "passed away", "lost my", "funeral", "grief", "devastated", "broken", "can't go on",
             "死んだ", "亡くなった", "永遠に", "葬儀", "喪", "うつ", "崩壊"
         ]
 
-        # 害羞关键词（增加了日文）
+        # 害羞关键词
         self.shy_keywords = [
             "害羞", "不好意思", "脸红", "偷偷", "扭捏", "不好意思说", "呜……", "那个……",
             "shy", "blush", "embarrassed", "fidget", "um...",
@@ -270,7 +274,7 @@ class EchoSamplerProcessor(LogitsProcessor):
             elif mood_score < -1.0:
                 temp -= 0.15
                 
-            temp = torch.clamp(temp, 0.7, 1.3)
+            temp = torch.clamp(temp, self.config['min_temp'], 1.3)
             
             noise_std = self.config['dream']['noise_std_base'] + self.config['dream']['varent_coeff'] * smooth_varent.clamp(0.5, 3.0)
             noise = noise_std * torch.randn_like(logits)
@@ -283,15 +287,16 @@ class EchoSamplerProcessor(LogitsProcessor):
                 
                 applied = False
                 
-                if mood_score < -3.0:
+                if mood_score < -3.0:  # 超级难过
                     boost = base_boost * self.config['dream']['deep_comfort_multiplier']
-                    mask = self.deep_comfort_boost_mask.to(logits.device)
-                    logits[mask] += boost
-                    temp = max(temp - 0.3, 0.6)
-                    self.sparkle_cooldown = max(1, self.config['dream']['sparkle_cooldown_steps'] // 2)
+                    deep_mask = self.deep_comfort_boost_mask.to(logits.device)
+                    light_mask = self.light_comfort_boost_mask.to(logits.device)
+                    logits[deep_mask] += boost
+                    logits[light_mask] += boost * 0.6  # 加点轻度安慰过渡更自然～
+                    temp = max(temp - 0.3, self.config['min_temp'])
                     applied = True
                     
-                elif mood_score < -0.8:
+                elif mood_score < -0.8:  # 普通难过
                     boost = base_boost * self.config['dream']['normal_comfort_multiplier']
                     deep_mask = self.deep_comfort_boost_mask.to(logits.device)
                     light_mask = self.light_comfort_boost_mask.to(logits.device)
@@ -299,7 +304,7 @@ class EchoSamplerProcessor(LogitsProcessor):
                     logits[light_mask] += boost * 0.8
                     applied = True
                     
-                elif 0.3 < mood_score < 1.8:
+                elif 0.3 < mood_score < 1.8:  # 害羞开心
                     boost = base_boost * self.config['dream']['shy_multiplier']
                     shy_mask = self.shy_boost_mask.to(logits.device)
                     sparkle_mask = self.sparkle_boost_mask.to(logits.device)
@@ -307,7 +312,7 @@ class EchoSamplerProcessor(LogitsProcessor):
                     logits[sparkle_mask] += boost * 0.6
                     applied = True
                     
-                elif mood_score > 1.0:
+                elif mood_score > 1.0:  # 超开心
                     boost = base_boost * self.config['dream']['happy_multiplier']
                     mask = self.sparkle_boost_mask.to(logits.device)
                     logits[mask] += boost
@@ -317,8 +322,11 @@ class EchoSamplerProcessor(LogitsProcessor):
                     mask = self.sparkle_boost_mask.to(logits.device)
                     logits[mask] += base_boost * self.config['dream']['default_multiplier']
                 
-                if not applied or mood_score >= -3.0:
-                    self.sparkle_cooldown = self.config['dream']['sparkle_cooldown_steps']
+                # 动态cooldown：心情越好，冷却越短～
+                mood_factor = max(-1.0, min(1.0, mood_score / 3.0))
+                cooldown_range = self.config['dream']['sparkle_cooldown_max'] - self.config['dream']['sparkle_cooldown_min']
+                dynamic_cooldown = self.config['dream']['sparkle_cooldown_base'] + cooldown_range * (-mood_factor)
+                self.sparkle_cooldown = max(self.config['dream']['sparkle_cooldown_min'], int(dynamic_cooldown))
             
             if self.sparkle_cooldown > 0:
                 self.sparkle_cooldown -= 1
