@@ -9,6 +9,7 @@ class EchoSamplerProcessor(LogitsProcessor):
     更会安慰深度低谷～还会害羞扭捏哦～😽💖🫶
     三语全覆盖：中文、日文、英文
     更新：加入最小温度保护 + 动态cooldown + 更柔和mood_swing
+    优化：entropy-related boost + 混合情绪检测 + 情绪转折cooldown重置
     """
     
     def __init__(self, config=None, dream_mode=True, vocab_size=None):
@@ -32,7 +33,8 @@ class EchoSamplerProcessor(LogitsProcessor):
                     'normal_comfort_multiplier': 1.6,
                     'shy_multiplier': 1.4,
                     'happy_multiplier': 1.8,
-                    'default_multiplier': 1.0
+                    'default_multiplier': 1.0,
+                    'max_boost': 5.0  # 新加：boost上限，防止太强势～
                 },
                 'top_p': 0.95,
                 'repetition_penalty': 1.12,
@@ -59,6 +61,7 @@ class EchoSamplerProcessor(LogitsProcessor):
         self.alpha = 0.75
 
         self.memory_mood = 0.0
+        self.prev_mood = 0.0  # 新加：用于检测情绪转折
 
         # 三语俏皮彩蛋
         self.sparkle_tokens_zh = ["～", "嘿嘿", "嘻嘻", "啦～", "呢～", "呀～", "嘛～", "哒～", "啾咪", "么么哒", "小坏蛋", "小可爱～",
@@ -128,6 +131,17 @@ class EchoSamplerProcessor(LogitsProcessor):
             "恥ずかしい", "照れる", "もじもじ", "あの", "うう"
         ]
 
+        # 新加：开心关键词（用于混合情绪）
+        self.happy_keywords = ["开心", "耶", "好棒", "喜欢", "爱你", "撒娇", "嘿嘿", "嘻嘻", "yay", "happy", "fun", "兴奋", "哇塞", "太棒啦",
+                               "嬉しい", "かわいい", "大好き", "わーい", "やったー"]
+
+        # 难过关键词
+        self.sad_keywords = ["难过", "伤心", "呜呜", "哭", "不开心", "累", "难受", "烦", "sad", "tired", "upset", "lonely",
+                             "悲しい", "つらい", "寂しい", "泣く"]
+
+        # 生气关键词
+        self.angry_keywords = ["生气", "哼", "讨厌", "烦", "angry", "mad", "怒ってる", "嫌い"]
+
         self.sparkle_ids = None
         self.sparkle_boost_mask = None
         self.light_comfort_ids = None
@@ -160,24 +174,35 @@ class EchoSamplerProcessor(LogitsProcessor):
             return 0.0
         text = self.tokenizer.decode(input_ids[0], skip_special_tokens=True).lower()
         
-        happy_keywords = ["开心", "耶", "好棒", "喜欢", "爱你", "撒娇", "嘿嘿", "嘻嘻", "yay", "happy", "fun", "兴奋", "哇塞", "太棒啦",
-                          "嬉しい", "かわいい", "大好き", "わーい", "やったー"]
-        sad_keywords = ["难过", "伤心", "呜呜", "哭", "不开心", "累", "难受", "烦", "sad", "tired", "upset", "lonely",
-                        "悲しい", "つらい", "寂しい", "泣く"]
-        angry_keywords = ["生气", "哼", "讨厌", "烦", "angry", "mad", "怒ってる", "嫌い"]
-        
         score = 0.0
         
-        if any(k in text for k in happy_keywords): score += 1.8
-        if any(k in text for k in self.shy_keywords): score += 0.8
-        if any(k in text for k in sad_keywords): score -= 2.0
-        if any(k in text for k in angry_keywords): score -= 1.2
+        # 优化：加权重处理混合情绪
+        happy_count = sum(1 for k in self.happy_keywords if k in text)
+        sad_count = sum(1 for k in self.sad_keywords if k in text)
+        angry_count = sum(1 for k in self.angry_keywords if k in text)
+        shy_count = sum(1 for k in self.shy_keywords if k in text)
+        deep_sad_count = sum(1 for k in self.deep_sad_keywords if k in text)
         
-        if any(k in text for k in self.deep_sad_keywords):
-            score -= 5.0
+        score += happy_count * 1.8
+        score += shy_count * 0.8
+        score -= sad_count * 2.0
+        score -= angry_count * 1.2
+        score -= deep_sad_count * 5.0
+        
+        # 归一化，避免极端
+        total_keywords = happy_count + sad_count + angry_count + shy_count + deep_sad_count
+        if total_keywords > 0:
+            score /= total_keywords
         
         mood = 0.7 * self.memory_mood + 0.3 * score
         self.memory_mood = mood
+        
+        # 新加：检测情绪转折
+        mood_delta = abs(mood - self.prev_mood)
+        if mood_delta > 2.0:  # 大转折时，缩短cooldown
+            self.sparkle_cooldown = max(0, self.sparkle_cooldown - 3)
+        self.prev_mood = mood
+        
         return mood
 
     def set_tokenizer(self, tokenizer):
@@ -281,9 +306,11 @@ class EchoSamplerProcessor(LogitsProcessor):
             logits = logits / temp + noise
             
             if smooth_ent < self.config['low_ent_thres'] and self.sparkle_cooldown <= 0:
+                # 优化：boost和entropy反相关，更丝滑～
+                ent_factor = (self.config['dream']['target_ent'] - smooth_ent) / self.config['dream']['target_ent']
                 base_boost = self.config['dream']['sparkle_boost_base'] + \
-                             (self.config['dream']['sparkle_boost_max'] - self.config['dream']['sparkle_boost_base']) * \
-                             (self.config['dream']['target_ent'] - smooth_ent) / self.config['dream']['target_ent']
+                             (self.config['dream']['sparkle_boost_max'] - self.config['dream']['sparkle_boost_base']) * ent_factor
+                base_boost = min(base_boost, self.config['dream']['max_boost'])
                 
                 applied = False
                 
