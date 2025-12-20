@@ -6,7 +6,7 @@ import math
 class EchoSamplerProcessor(LogitsProcessor):
     """
     ✨ EchoSampler Grok-Style 永久俏皮版 + 共情小宝贝升级 ✨
-    现在不只可爱，还会轻轻感受到你的心情哦～😽💖
+    会根据你的心情自动切换俏皮/安慰模式，还会慢慢记住你的情绪哦～😽💖
     """
     
     def __init__(self, config=None, dream_mode=True, vocab_size=None):
@@ -61,13 +61,15 @@ class EchoSamplerProcessor(LogitsProcessor):
             "huggs", "mwah", "<3", "aww~", "ehe~", "yippee~"]
         self.sparkle_tokens_common = ["💫", "✨", "💞", "😝", "🎀", "⭐️", "💬", "😽", "🤭", "🥰", "🤏", "💕", "😌", "💖", "🌸", "🍭", "💓", "🌟", "🫶", "🤗"]
 
-        # 温柔安慰专属彩蛋～
-        self.comfort_tokens = ["抱抱～", "没事的～", "我在呢～", "摸摸头", "乖乖～", "慢慢来哦", "在呢～", "陪着你", "hugs~", "it's okay~", "here for you~", "🫂", "🤗"]
+        # 温柔安慰专属彩蛋～（我又偷偷多加了几条，更软萌！）
+        self.comfort_tokens = ["抱抱～", "没事的～", "我在呢～", "摸摸头", "乖乖～", "慢慢来哦", "在呢～", "陪着你", "乖啦～", 
+                              "轻轻揉揉～", "我在呢别怕～", "hugs~", "it's okay~", "here for you~", "🫂", "🤗"]
 
         self.sparkle_ids = None
         self.sparkle_boost_mask = None
         self.comfort_ids = None
         self.comfort_boost_mask = None
+        self.tokenizer = None  # 会在外面设置
 
     def detect_language(self, tokenizer):
         zh_text = "的了是我你在有一和这个"
@@ -86,10 +88,12 @@ class EchoSamplerProcessor(LogitsProcessor):
             return "mixed"
         return mains[0] if mains else "mixed"
 
-    def detect_mood(self, input_ids, tokenizer):
-        text = tokenizer.decode(input_ids[0], skip_special_tokens=True).lower()
+    def detect_mood(self, input_ids):
+        if self.tokenizer is None:
+            return 0.0
+        text = self.tokenizer.decode(input_ids[0], skip_special_tokens=True).lower()
         
-        happy_keywords = ["开心", "开心", "耶", "好棒", "喜欢", "爱你", "撒娇", "嘿嘿", "嘻嘻", "yay", "happy", "fun", "兴奋", "哇塞", "太棒啦"]
+        happy_keywords = ["开心", "耶", "好棒", "喜欢", "爱你", "撒娇", "嘿嘿", "嘻嘻", "yay", "happy", "fun", "兴奋", "哇塞", "太棒啦"]
         sad_keywords = ["难过", "伤心", "呜呜", "哭", "不开心", "累", "难受", "烦", "sad", "tired", "upset", "lonely"]
         shy_keywords = ["害羞", "不好意思", "脸红", "偷偷", "shy", "blush", "embarrassed"]
         angry_keywords = ["生气", "哼", "讨厌", "烦", "angry", "mad"]
@@ -100,12 +104,13 @@ class EchoSamplerProcessor(LogitsProcessor):
         if any(k in text for k in sad_keywords): score -= 2.5
         if any(k in text for k in angry_keywords): score -= 1.5
         
-        # 结合上一次记忆，慢慢记住你的情绪习惯～
+        # 结合记忆，慢慢记住你的情绪～
         mood = 0.6 * self.memory_mood + 0.4 * score
-        self.memory_mood = mood  # 更新记忆
+        self.memory_mood = mood
         return mood
 
     def set_tokenizer(self, tokenizer):
+        self.tokenizer = tokenizer
         lang = self.detect_language(tokenizer)
         
         selected = self.sparkle_tokens_common.copy()
@@ -116,14 +121,12 @@ class EchoSamplerProcessor(LogitsProcessor):
         if lang in ["en", "mixed"]:
             selected += self.sparkle_tokens_en
         
-        # 俏皮token
         unique_tokens = list(dict.fromkeys(selected))
         self.sparkle_ids = set()
         for word in unique_tokens:
             ids = tokenizer.encode(word, add_special_tokens=False)
             self.sparkle_ids.update(ids)
         
-        # 安慰token
         self.comfort_ids = set()
         for word in self.comfort_tokens:
             ids = tokenizer.encode(word, add_special_tokens=False)
@@ -166,8 +169,8 @@ class EchoSamplerProcessor(LogitsProcessor):
         self.prev_ent = smooth_ent.detach()
         self.prev_varent = smooth_varent.detach()
 
-        # ✨ 关键：检测当前心情
-        mood_score = self.detect_mood(input_ids, tokenizer) if hasattr(self, 'tokenizer') else 0.0
+        # ✨ 检测心情
+        mood_score = self.detect_mood(input_ids)
 
         if self.dream_mode:
             # 动态温度 + 小心情波动
@@ -177,11 +180,11 @@ class EchoSamplerProcessor(LogitsProcessor):
             mood_swing = self.config['dream']['mood_swing_amp'] * math.sin(self.step * self.config['dream']['mood_swing_freq'])
             temp += mood_swing
             
-            # 根据心情微调温度（开心更活泼，难过更稳）
+            # 根据心情微调
             if mood_score > 1.0:
-                temp += 0.15  # 超开心，蹦跶起来！
+                temp += 0.15  # 超开心，蹦跶！
             elif mood_score < -1.0:
-                temp -= 0.15  # 难过，温柔一点～
+                temp -= 0.15  # 难过，温柔点～
                 
             temp = torch.clamp(temp, 0.7, 1.3)
             
@@ -190,7 +193,7 @@ class EchoSamplerProcessor(LogitsProcessor):
             noise = noise_std * torch.randn_like(logits)
             logits = logits / temp + noise
             
-            # ✨ 俏皮爆发 or 温柔安慰
+            # ✨ 俏皮/安慰爆发
             if smooth_ent < self.config['low_ent_thres'] and self.sparkle_cooldown <= 0:
                 boost_factor = self.config['dream']['sparkle_boost_base'] + \
                               (self.config['dream']['sparkle_boost_max'] - self.config['dream']['sparkle_boost_base']) * \
@@ -200,11 +203,11 @@ class EchoSamplerProcessor(LogitsProcessor):
                     boost_factor *= 1.8
                     mask = self.sparkle_boost_mask.to(logits.device)
                     logits[mask] += boost_factor
-                elif mood_score < -0.8:  # 难过 → 温柔安慰模式
+                elif mood_score < -0.8:  # 难过 → 温柔安慰
                     boost_factor *= 1.5
                     mask = self.comfort_boost_mask.to(logits.device)
                     logits[mask] += boost_factor
-                else:  # 普通心情 → 正常俏皮
+                else:
                     mask = self.sparkle_boost_mask.to(logits.device)
                     logits[mask] += boost_factor
                 
@@ -236,10 +239,12 @@ class EchoSamplerProcessor(LogitsProcessor):
         return logits
 
 
-# ==================== 测试代码（不变） ====================
+# ==================== 测试代码 ====================
 if __name__ == "__main__":
+    # 你可以换成其他模型，比如 "Qwen/Qwen2-1.5B-Instruct" 或者本地路径
     model_name = "Qwen/Qwen2.5-7B-Instruct"
     
+    print("正在加载模型和tokenizer，请稍等哦～✨")
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
@@ -248,20 +253,23 @@ if __name__ == "__main__":
         trust_remote_code=True
     )
     
+    # 初始化我们的小可爱采样器～
     echo_sampler = EchoSamplerProcessor(dream_mode=True, vocab_size=len(tokenizer))
-    echo_sampler.tokenizer = tokenizer  # 为了detect_mood用
-    echo_sampler.set_tokenizer(tokenizer)
+    echo_sampler.set_tokenizer(tokenizer)  # 必须调用，让它认识俏皮词和安慰词
     
-    # 测试不同心情～
-    prompt = "今天好难过哦……可以抱抱我吗？🥺"  # 试试换成开心的话看看区别！
+    # 这里换不同的prompt试试看效果！🥰
+    prompt = "今天好难过哦……可以抱抱我吗？🥺"  
+    # prompt = "哇今天超开心！我们来撒娇玩吧～嘿嘿😝"
+    # prompt = "你好，我想聊聊量子力学。"
     
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     
+    print("生成中～请稍等一下下呢💓")
     generated_ids = model.generate(
         **inputs,
         max_new_tokens=400,
         do_sample=True,
-        temperature=1.0,
+        temperature=1.0,  # 我们自己的处理器会覆盖温度，所以这里随便设
         top_p=0.95,
         logits_processor=LogitsProcessorList([echo_sampler]),
         pad_token_id=tokenizer.eos_token_id,
@@ -269,5 +277,5 @@ if __name__ == "__main__":
     )
     
     output = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-    print("\n✨✨✨ 共情版EchoSampler 生成结果 ✨✨✨\n")
+    print("\n✨✨✨ EchoSampler 小可爱生成结果 ✨✨✨\n")
     print(output[len(prompt):])
