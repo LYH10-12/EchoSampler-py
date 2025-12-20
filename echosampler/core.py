@@ -10,6 +10,7 @@ class EchoSamplerProcessor(LogitsProcessor):
     三语全覆盖：中文、日文、英文
     更新：加入最小温度保护 + 动态cooldown + 更柔和mood_swing
     优化：entropy-related boost + 混合情绪检测 + 情绪转折cooldown重置
+    新加：语义扩展 for deep_sad + 类别分开cooldown + 通用彩蛋扩展
     """
     
     def __init__(self, config=None, dream_mode=True, vocab_size=None):
@@ -46,7 +47,11 @@ class EchoSamplerProcessor(LogitsProcessor):
         self.dream_mode = dream_mode
         self.vocab_size = vocab_size
         self.step = 0
+        # 新加：类别分开cooldown～
         self.sparkle_cooldown = 0
+        self.comfort_cooldown = 0
+        self.shy_cooldown = 0
+        self.happy_cooldown = 0
 
         if self.vocab_size:
             scale = math.log(self.vocab_size) / math.log(50000)
@@ -70,7 +75,9 @@ class EchoSamplerProcessor(LogitsProcessor):
             "ふふ", "えへへ", "うふふ", "きゃ～", "わーい", "やった～", "すごい～", "かわいい～", "だね～", "よね～"]
         self.sparkle_tokens_en = ["~", "hehe", "teehee", "uwu", "xD", "lol", "yay~", "woohoo~", "omg~", "boop", "nya~", "rawr~",
             "huggs", "mwah", "<3", "aww~", "ehe~", "yippee~"]
-        self.sparkle_tokens_common = ["💫", "✨", "💞", "😝", "🎀", "⭐️", "💬", "😽", "🤭", "🥰", "🤏", "💕", "😌", "💖", "🌸", "🍭", "💓", "🌟", "🫶", "🤗"]
+        # 优化：加通用可爱表情～
+        self.sparkle_tokens_common = ["💫", "✨", "💞", "😝", "🎀", "⭐️", "💬", "😽", "🤭", "🥰", "🤏", "💕", "😌", "💖", "🌸", "🍭", "💓", "🌟", "🫶", "🤗",
+                                      "><", "QwQ", "^_^", "T_T", "O_o"]
 
         # 三语轻度安慰
         self.comfort_tokens_light = [
@@ -117,11 +124,14 @@ class EchoSamplerProcessor(LogitsProcessor):
             "don't say that~", "you're making me shy~"
         ]
 
-        # 深度难过关键词
+        # 深度难过关键词（新加：扩展隐晦表达～）
         self.deep_sad_keywords = [
             "过世", "去世", "走了", "永远离开了", "亲人没了", "爸爸妈妈", "爷爷奶奶", "逝世", "葬礼", "丧", "抑郁", "崩溃", "活不下去了",
             "died", "passed away", "lost my", "funeral", "grief", "devastated", "broken", "can't go on",
-            "死んだ", "亡くなった", "永遠に", "葬儀", "喪", "うつ", "崩壊"
+            "死んだ", "亡くなった", "永遠に", "葬儀", "喪", "うつ", "崩壊",
+            # 新加：隐晦低谷扩展
+            "失眠", "世界灰色", "绝望", "空虚", "不想活", "崩溃边缘", "心碎", "孤独", "insomnia", "world is gray", "hopeless", "empty", "don't want to live", "on the edge", "heartbroken", "alone",
+            "不眠", "世界が灰色", "絶望", "空虚", "生きる気力がない"
         ]
 
         # 害羞关键词
@@ -181,7 +191,7 @@ class EchoSamplerProcessor(LogitsProcessor):
         sad_count = sum(1 for k in self.sad_keywords if k in text)
         angry_count = sum(1 for k in self.angry_keywords if k in text)
         shy_count = sum(1 for k in self.shy_keywords if k in text)
-        deep_sad_count = sum(1 for k in self.deep_sad_keywords if k in text)
+        deep_sad_count = sum(1 for k in self.deep_sad_keywords if k in text)  # 已扩展
         
         score += happy_count * 1.8
         score += shy_count * 0.8
@@ -199,8 +209,11 @@ class EchoSamplerProcessor(LogitsProcessor):
         
         # 新加：检测情绪转折
         mood_delta = abs(mood - self.prev_mood)
-        if mood_delta > 2.0:  # 大转折时，缩短cooldown
+        if mood_delta > 2.0:  # 大转折时，缩短所有cooldown
             self.sparkle_cooldown = max(0, self.sparkle_cooldown - 3)
+            self.comfort_cooldown = max(0, self.comfort_cooldown - 3)
+            self.shy_cooldown = max(0, self.shy_cooldown - 3)
+            self.happy_cooldown = max(0, self.happy_cooldown - 3)
         self.prev_mood = mood
         
         return mood
@@ -305,7 +318,7 @@ class EchoSamplerProcessor(LogitsProcessor):
             noise = noise_std * torch.randn_like(logits)
             logits = logits / temp + noise
             
-            if smooth_ent < self.config['low_ent_thres'] and self.sparkle_cooldown <= 0:
+            if smooth_ent < self.config['low_ent_thres']:
                 # 优化：boost和entropy反相关，更丝滑～
                 ent_factor = (self.config['dream']['target_ent'] - smooth_ent) / self.config['dream']['target_ent']
                 base_boost = self.config['dream']['sparkle_boost_base'] + \
@@ -314,7 +327,7 @@ class EchoSamplerProcessor(LogitsProcessor):
                 
                 applied = False
                 
-                if mood_score < -3.0:  # 超级难过
+                if mood_score < -3.0 and self.comfort_cooldown <= 0:  # 超级难过
                     boost = base_boost * self.config['dream']['deep_comfort_multiplier']
                     deep_mask = self.deep_comfort_boost_mask.to(logits.device)
                     light_mask = self.light_comfort_boost_mask.to(logits.device)
@@ -322,41 +335,43 @@ class EchoSamplerProcessor(LogitsProcessor):
                     logits[light_mask] += boost * 0.6  # 加点轻度安慰过渡更自然～
                     temp = max(temp - 0.3, self.config['min_temp'])
                     applied = True
+                    self._set_cooldown('comfort', mood_score)
                     
-                elif mood_score < -0.8:  # 普通难过
+                elif mood_score < -0.8 and self.comfort_cooldown <= 0:  # 普通难过
                     boost = base_boost * self.config['dream']['normal_comfort_multiplier']
                     deep_mask = self.deep_comfort_boost_mask.to(logits.device)
                     light_mask = self.light_comfort_boost_mask.to(logits.device)
                     logits[deep_mask] += boost * 1.2
                     logits[light_mask] += boost * 0.8
                     applied = True
+                    self._set_cooldown('comfort', mood_score)
                     
-                elif 0.3 < mood_score < 1.8:  # 害羞开心
+                elif 0.3 < mood_score < 1.8 and self.shy_cooldown <= 0:  # 害羞开心
                     boost = base_boost * self.config['dream']['shy_multiplier']
                     shy_mask = self.shy_boost_mask.to(logits.device)
                     sparkle_mask = self.sparkle_boost_mask.to(logits.device)
                     logits[shy_mask] += boost
                     logits[sparkle_mask] += boost * 0.6
                     applied = True
+                    self._set_cooldown('shy', mood_score)
                     
-                elif mood_score > 1.0:  # 超开心
+                elif mood_score > 1.0 and self.happy_cooldown <= 0:  # 超开心
                     boost = base_boost * self.config['dream']['happy_multiplier']
                     mask = self.sparkle_boost_mask.to(logits.device)
                     logits[mask] += boost
                     applied = True
+                    self._set_cooldown('happy', mood_score)
                 
-                if not applied:
+                if not applied and self.sparkle_cooldown <= 0:
                     mask = self.sparkle_boost_mask.to(logits.device)
                     logits[mask] += base_boost * self.config['dream']['default_multiplier']
-                
-                # 动态cooldown：心情越好，冷却越短～
-                mood_factor = max(-1.0, min(1.0, mood_score / 3.0))
-                cooldown_range = self.config['dream']['sparkle_cooldown_max'] - self.config['dream']['sparkle_cooldown_min']
-                dynamic_cooldown = self.config['dream']['sparkle_cooldown_base'] + cooldown_range * (-mood_factor)
-                self.sparkle_cooldown = max(self.config['dream']['sparkle_cooldown_min'], int(dynamic_cooldown))
+                    self._set_cooldown('sparkle', mood_score)
             
-            if self.sparkle_cooldown > 0:
-                self.sparkle_cooldown -= 1
+            # 新加：递减所有cooldown
+            self.sparkle_cooldown = max(0, self.sparkle_cooldown - 1)
+            self.comfort_cooldown = max(0, self.comfort_cooldown - 1)
+            self.shy_cooldown = max(0, self.shy_cooldown - 1)
+            self.happy_cooldown = max(0, self.happy_cooldown - 1)
                 
             if self.typical_warper:
                 logits = self.typical_warper(input_ids, logits)
@@ -376,3 +391,18 @@ class EchoSamplerProcessor(LogitsProcessor):
             logits = logits / temp
         
         return logits
+
+    # 新加：动态设置cooldown的辅助函数～
+    def _set_cooldown(self, category, mood_score):
+        mood_factor = max(-1.0, min(1.0, mood_score / 3.0))
+        cooldown_range = self.config['dream']['sparkle_cooldown_max'] - self.config['dream']['sparkle_cooldown_min']
+        dynamic_cooldown = self.config['dream']['sparkle_cooldown_base'] + cooldown_range * (-mood_factor)
+        cooldown = max(self.config['dream']['sparkle_cooldown_min'], int(dynamic_cooldown))
+        if category == 'comfort':
+            self.comfort_cooldown = cooldown
+        elif category == 'shy':
+            self.shy_cooldown = cooldown
+        elif category == 'happy':
+            self.happy_cooldown = cooldown
+        elif category == 'sparkle':
+            self.sparkle_cooldown = cooldown
