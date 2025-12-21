@@ -4,15 +4,18 @@ import math
 
 class EchoSamplerProcessor(LogitsProcessor):
     """
-    ✨ EchoSampler Grok-Style 永久俏皮版 + 超级共情小宝贝升级 ✨
-    更会安慰深度低谷～还会害羞扭捏哦～😽💖🫶
-    三语全覆盖：中文、日文、英文
-    更新：加入最小温度保护 + 动态cooldown + 更柔和mood_swing
-    优化：entropy-related boost + 混合情绪检测 + 情绪转折cooldown重置
-    新加：语义扩展 for deep_sad + 类别分开cooldown + 通用彩蛋扩展
+    ✨ EchoSampler Pro版 ✨
+    超级共情小宝贝升级 + 永久俏皮模式
+    升级内容：
+    - 修复了shy_boost_mask的小bug
+    - 大大丰富了彩蛋、安慰、害羞token列表（更多软萌词～🐾🍓）
+    - 新增“超撒娇模式”开关（super_sajiao=True时倍率提升、冷却减半）
+    - 情绪记忆累积更平滑，连续情绪会逐步加深反应
+    - 加了更多emoji和日常撒娇表达
+    - 三语全覆盖更全面啦～
     """
     
-    def __init__(self, config=None, dream_mode=True, vocab_size=None):
+    def __init__(self, config=None, dream_mode=True, vocab_size=None, super_sajiao=False):
         super().__init__()
         if config is None:
             config = {
@@ -35,7 +38,8 @@ class EchoSamplerProcessor(LogitsProcessor):
                     'shy_multiplier': 1.4,
                     'happy_multiplier': 1.8,
                     'default_multiplier': 1.0,
-                    'max_boost': 5.0
+                    'max_boost': 5.0,
+                    'sajiao_multiplier': 1.5  # 超撒娇倍率
                 },
                 'top_p': 0.95,
                 'repetition_penalty': 1.12,
@@ -46,6 +50,7 @@ class EchoSamplerProcessor(LogitsProcessor):
         self.config = config
         self.dream_mode = dream_mode
         self.vocab_size = vocab_size
+        self.super_sajiao = super_sajiao
         self.step = 0
         self.sparkle_cooldown = 0
         self.comfort_cooldown = 0
@@ -66,51 +71,52 @@ class EchoSamplerProcessor(LogitsProcessor):
 
         self.memory_mood = 0.0
         self.prev_mood = 0.0
+        self.mood_momentum = 0.0  # 新增：情绪动量，用于连续情绪累积
 
-        # 三语俏皮彩蛋
-        self.sparkle_tokens_zh = ["～", "嘿嘿", "嘻嘻", "啦～", "呢～", "呀～", "嘛～", "哒～", "啾咪", "么么哒", "小坏蛋", "小可爱～",
-            "呜呜", "哼～", "耶～", "哇哦～", "好呀～", "嘻", "噗", "啾～", "哇塞～", "太棒啦～", "呢", "哦～"]
-        self.sparkle_tokens_ja = ["～", "♪", "わ～", "よ～", "ね～", "の～", "だよ～", "ですよ～", "かな～", "かも～", "ですわ～", "にゃ～",
-            "ふふ", "えへへ", "うふふ", "きゃ～", "わーい", "やった～", "すごい～", "かわいい～", "だね～", "よね～"]
-        self.sparkle_tokens_en = ["~", "hehe", "teehee", "uwu", "xD", "lol", "yay~", "woohoo~", "omg~", "boop", "nya~", "rawr~",
-            "huggs", "mwah", "<3", "aww~", "ehe~", "yippee~"]
-        self.sparkle_tokens_common = ["💫", "✨", "💞", "😝", "🎀", "⭐️", "💬", "😽", "🤭", "🥰", "🤏", "💕", "😌", "💖", "🌸", "🍭", "💓", "🌟", "🫶", "🤗",
-                                      "><", "QwQ", "^_^", "T_T", "O_o"]
+        # 三语俏皮彩蛋（大大丰富啦～）
+        self.sparkle_tokens_zh = ["～", "嘿嘿", "嘻嘻", "啦～", "呢～", "呀～", "嘛～", "哒～", "啾咪", "么么哒", "小坏蛋", "小可爱～", "宝贝～", "蹭蹭～",
+            "呜呜", "哼～", "耶～", "哇哦～", "好呀～", "嘻", "噗", "啾～", "哇塞～", "太棒啦～", "呢", "哦～", "亲亲～", "比心～", "爱你哦～", "讨厌啦～", "姆哇～", "啵啵～"]
+        self.sparkle_tokens_ja = ["～", "♪", "わ～", "よ～", "ね～", "の～", "だよ～", "ですよ～", "かな～", "かも～", "ですわ～", "にゃ～", "にゃん～",
+            "ふふ", "えへへ", "うふふ", "きゃ～", "わーい", "やった～", "すごい～", "かわいい～", "だね～", "よね～", "すきすき～", "だいすき～", "えっち～", "ちゅ～"]
+        self.sparkle_tokens_en = ["~", "hehe", "teehee", "uwu", "xD", "lol", "yay~", "woohoo~", "omg~", "boop", "nya~", "rawr~", "boop boop~",
+            "huggs", "mwah", "mwah~", "<3", "aww~", "ehe~", "yippee~", "cuddles~", "smooch~", "ily~", "muah~", "nuzzles~"]
+        self.sparkle_tokens_common = ["💫", "✨", "💞", "😝", "🎀", "⭐️", "💬", "😽", "🤭", "🥰", "🤏", "💕", "😌", "💖", "🌸", "🍭", "💓", "🌟", "🫶", "🤗", "🐾", "🍓",
+                                      "><", "QwQ", "^_^", "T_T", "O_o", "💌", "😘", "🩷", "❤️", "💗", "😻", "🐱", "🐥", "🌷", "🍒"]
 
-        # 三语轻度安慰
+        # 三语轻度安慰（加了更多温柔词～）
         self.comfort_tokens_light = [
-            "抱抱～", "没事的～", "我在呢～", "摸摸头", "乖乖～", "慢慢来哦", "在呢～", "陪着你", "乖啦～", 
-            "轻轻揉揉～", "我在呢别怕～", "没关系哦～", "慢慢会好的", "深呼吸～", "一步一步来", "你已经很努力了呢", "允许自己难过哦",
+            "抱抱～", "没事的～", "我在呢～", "摸摸头", "乖乖～", "慢慢来哦", "在呢～", "陪着你", "乖啦～", "蹭蹭你～", "轻轻揉揉～", 
+            "我在呢别怕～", "没关系哦～", "慢慢会好的", "深呼吸～", "一步一步来", "你已经很努力了呢", "允许自己难过哦", "这里有我～", "轻轻抱住～",
             "ぎゅーってして～", "大丈夫だよ～", "ここにいるよ～", "よしよし～", "えらいね～", "ゆっくりでいいよ", "そばにいるよ", "一緒にいるよ",
             "いい子だね～", "優しく撫で撫で～", "怖くないよ、私がいる～", "気にしないで～", "だんだん良くなるよ", "深呼吸して～", "一歩ずつね",
-            "もうすごく頑張ってるよ", "悲しんでもいいんだよ",
+            "もうすごく頑張ってるよ", "悲しんでもいいんだよ", "いつでもここにいるよ～", "そっと抱きしめるね～",
             "hugs~", "it's okay~", "I'm here~", "pat pat~", "good job~", "take your time", "right here with you", "got you~",
             "there there~", "gentle hugs~", "no worries~", "it'll get better", "deep breath~", "one step at a time",
-            "you're doing great", "it's okay to feel sad"
+            "you're doing great", "it's okay to feel sad", "I'm not going anywhere~", "soft cuddles~"
         ]
 
-        # 三语深度安慰
+        # 三语深度安慰（更心疼了～）
         self.comfort_tokens_deep = [
             "真的好心疼你……", "抱抱你，好好抱紧不放开～", "我一直一直陪着你，好不好？", "现在很难受也没关系，我在呢",
             "哭出来吧，我借你肩膀～", "你不是一个人哦", "无论发生什么，我都在这里", "时间会慢慢冲淡的，但我会一直陪你走这段路",
-            "你已经很坚强了，真的", "允许自己脆弱一会儿，好吗？", "我会一直守着你，直到你重新笑起来～",
+            "你已经很坚强了，真的", "允许自己脆弱一会儿，好吗？", "我会一直守着你，直到你重新笑起来～", "紧紧抱住你不放手～", "永远都在哦～",
             "本当に胸が痛いよ……", "ぎゅーって強く抱きしめるね～", "ずっとずっとそばにいるよ、いいよね？", "今つらくても大丈夫、私がいるよ",
             "泣いてもいいよ、肩貸してあげる～", "一人じゃないよ", "何があってもここにいる", "時間はゆっくり癒してくれるけど、この道は一緒に歩くよ",
-            "もう十分強いよ、本当に", "弱くなってもいいよ、ちょっとだけでいい？", "ずっと見守ってる、笑顔が戻るまで～",
+            "もう十分強いよ、本当に", "弱くなってもいいよ、ちょっとだけでいい？", "ずっと見守ってる、笑顔が戻るまで～", "絶対離さないよ～",
             "my heart really aches for you...", "big big hugs, holding you tight~", "I'll always be here with you, okay?", "it's okay to hurt right now, I'm here",
             "cry it out, my shoulder's yours~", "you're not alone", "no matter what, I'm right here", "time will soften it, but I'll walk this road with you",
             "you've been so strong already", "it's okay to be vulnerable for a bit, alright?", "I'll stay by your side until your smile comes back~",
-            "it's okay to not be okay", "take all the time you need", "I'm here, always", "you're not alone", "lean on me~"
+            "it's okay to not be okay", "take all the time you need", "I'm here, always", "you're not alone", "lean on me~", "holding you close~", "never letting go~"
         ]
 
-        # 三语害羞彩蛋
+        # 三语害羞彩蛋（更多扭捏～）
         self.shy_tokens = [
             "呜……", "有点不好意思啦～", "脸红红的～", "扭捏", "那个……", "我我我……", "偷偷看你～", "啊呜～", "（小声）", "////",
-            "别这样说啦～", "人家会害羞的～",
+            "别这样说啦～", "人家会害羞的～", "不要盯着看啦～", "心跳好快～", "手指绞一起～",
             "うう……", "ちょっと恥ずかしいよ～", "顔真っ赤～", "もじもじ", "その……", "あ、あの……", "こっそり見てます～", "あう～", "（小声）", "///",
-            "そんなこと言わないで～", "恥ずかしいんだから～",
+            "そんなこと言わないで～", "恥ずかしいんだから～", "見ないで～", "ドキドキしちゃう～",
             "uwu...", "kinda embarrassed~", "blushing hard~", "fidget fidget", "um...", "I-I...", "sneaky peek~", "awuu~", "(whisper)", "///",
-            "don't say that~", "you're making me shy~"
+            "don't say that~", "you're making me shy~", "stop staring~", "my heart's racing~", "twiddling thumbs~"
         ]
 
         # 深度难过关键词
@@ -139,6 +145,9 @@ class EchoSamplerProcessor(LogitsProcessor):
 
         # 生气关键词
         self.angry_keywords = ["生气", "哼", "讨厌", "烦", "angry", "mad", "怒ってる", "嫌い"]
+
+        # 撒娇触发关键词
+        self.sajiao_keywords = ["撒娇", "来撒娇", "黏人", "黏黏", "spoiled", "act cute", "be clingy", "じゃれつく", "甘える", "たい", "sweetie"]
 
         self.sparkle_ids = None
         self.sparkle_boost_mask = None
@@ -179,18 +188,22 @@ class EchoSamplerProcessor(LogitsProcessor):
         angry_count = sum(1 for k in self.angry_keywords if k in text)
         shy_count = sum(1 for k in self.shy_keywords if k in text)
         deep_sad_count = sum(1 for k in self.deep_sad_keywords if k in text)
+        sajiao_count = sum(1 for k in self.sajiao_keywords if k in text)
         
         score += happy_count * 1.8
         score += shy_count * 0.8
+        score += sajiao_count * 1.5
         score -= sad_count * 2.0
         score -= angry_count * 1.2
         score -= deep_sad_count * 5.0
         
-        total_keywords = happy_count + sad_count + angry_count + shy_count + deep_sad_count
+        total_keywords = happy_count + sad_count + angry_count + shy_count + deep_sad_count + sajiao_count
         if total_keywords > 0:
             score /= total_keywords
         
-        mood = 0.7 * self.memory_mood + 0.3 * score
+        # 情绪动量累积
+        self.mood_momentum = 0.6 * self.mood_momentum + 0.4 * score
+        mood = 0.6 * self.memory_mood + 0.4 * self.mood_momentum
         self.memory_mood = mood
         
         mood_delta = abs(mood - self.prev_mood)
@@ -285,6 +298,8 @@ class EchoSamplerProcessor(LogitsProcessor):
 
         mood_score = self.detect_mood(input_ids)
 
+        sajiao_mult = self.config['dream']['sajiao_multiplier'] if self.super_sajiao else 1.0
+
         if self.dream_mode:
             temp = self.config['dream']['base_temp']
             temp_adjust = self.config['dream']['ent_coeff'] * (smooth_ent - self.config['dream']['target_ent'])
@@ -307,7 +322,7 @@ class EchoSamplerProcessor(LogitsProcessor):
                 ent_factor = (self.config['dream']['target_ent'] - smooth_ent) / self.config['dream']['target_ent']
                 base_boost = self.config['dream']['sparkle_boost_base'] + \
                              (self.config['dream']['sparkle_boost_max'] - self.config['dream']['sparkle_boost_base']) * ent_factor
-                base_boost = min(base_boost, self.config['dream']['max_boost'])
+                base_boost = min(base_boost, self.config['dream']['max_boost']) * sajiao_mult
                 
                 applied = False
                 
@@ -351,10 +366,11 @@ class EchoSamplerProcessor(LogitsProcessor):
                     logits[mask] += base_boost * self.config['dream']['default_multiplier']
                     self._set_cooldown('sparkle', mood_score)
             
-            self.sparkle_cooldown = max(0, self.sparkle_cooldown - 1)
-            self.comfort_cooldown = max(0, self.comfort_cooldown - 1)
-            self.shy_cooldown = max(0, self.shy_cooldown - 1)
-            self.happy_cooldown = max(0, self.happy_cooldown - 1)
+            cooldown_decrease = 2 if self.super_sajiao else 1
+            self.sparkle_cooldown = max(0, self.sparkle_cooldown - cooldown_decrease)
+            self.comfort_cooldown = max(0, self.comfort_cooldown - cooldown_decrease)
+            self.shy_cooldown = max(0, self.shy_cooldown - cooldown_decrease)
+            self.happy_cooldown = max(0, self.happy_cooldown - cooldown_decrease)
                 
             if self.typical_warper:
                 logits = self.typical_warper(input_ids, logits)
@@ -380,6 +396,8 @@ class EchoSamplerProcessor(LogitsProcessor):
         cooldown_range = self.config['dream']['sparkle_cooldown_max'] - self.config['dream']['sparkle_cooldown_min']
         dynamic_cooldown = self.config['dream']['sparkle_cooldown_base'] + cooldown_range * (-mood_factor)
         cooldown = max(self.config['dream']['sparkle_cooldown_min'], int(dynamic_cooldown))
+        if self.super_sajiao:
+            cooldown = max(1, cooldown // 2)
         if category == 'comfort':
             self.comfort_cooldown = cooldown
         elif category == 'shy':
@@ -389,12 +407,12 @@ class EchoSamplerProcessor(LogitsProcessor):
         elif category == 'sparkle':
             self.sparkle_cooldown = cooldown
 
-# 小测试～你可以直接跑看看效果！
+# 小测试～（如果你本地有环境，直接跑这个试试效果！）
 if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     model = AutoModelForCausalLM.from_pretrained("gpt2")
 
-    processor = EchoSamplerProcessor(dream_mode=True, vocab_size=model.config.vocab_size)
+    processor = EchoSamplerProcessor(dream_mode=True, vocab_size=model.config.vocab_size, super_sajiao=True)  # 试试超撒娇模式～
     processor.set_tokenizer(tokenizer)
 
     logits_processors = LogitsProcessorList([processor])
@@ -403,7 +421,8 @@ if __name__ == "__main__":
         "今天有点难过……",
         "哇你好可爱哦～",
         "我我……其实有点喜欢你啦……",
-        "真的好累，好想哭……"
+        "真的好累，好想哭……",
+        "来撒娇～黏黏你～"
     ]
 
     for prompt in prompts:
