@@ -1,6 +1,5 @@
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, LogitsProcessorList, LogitsProcessor
-from transformers import TypicalLogitsWarper, RepetitionPenaltyLogitsProcessor
+from transformers import AutoTokenizer, AutoModelForCausalLM, LogitsProcessorList, LogitsProcessor, TypicalLogitsWarper, RepetitionPenaltyLogitsProcessor
 import math
 
 class EchoSamplerProcessor(LogitsProcessor):
@@ -14,6 +13,7 @@ class EchoSamplerProcessor(LogitsProcessor):
     """
     
     def __init__(self, config=None, dream_mode=True, vocab_size=None):
+        super().__init__()
         if config is None:
             config = {
                 'reality': {'min_temp': 0.8, 'max_temp': 1.0, 'ent_coeff': 0.18},
@@ -23,7 +23,7 @@ class EchoSamplerProcessor(LogitsProcessor):
                     'target_ent': 2.2,
                     'varent_coeff': 0.15,
                     'noise_std_base': 0.06,
-                    'mood_swing_amp': 0.04,          # 波动更柔和～
+                    'mood_swing_amp': 0.04,
                     'mood_swing_freq': 0.15,
                     'sparkle_boost_base': 1.3,
                     'sparkle_boost_max': 3.5,
@@ -35,19 +35,18 @@ class EchoSamplerProcessor(LogitsProcessor):
                     'shy_multiplier': 1.4,
                     'happy_multiplier': 1.8,
                     'default_multiplier': 1.0,
-                    'max_boost': 5.0  # 新加：boost上限，防止太强势～
+                    'max_boost': 5.0
                 },
                 'top_p': 0.95,
                 'repetition_penalty': 1.12,
                 'low_ent_thres': 1.6,
                 'low_varent_thres': 1.3,
-                'min_temp': 0.5  # 全局最低温度保护，防止太软绵绵～
+                'min_temp': 0.5
             }
         self.config = config
         self.dream_mode = dream_mode
         self.vocab_size = vocab_size
         self.step = 0
-        # 新加：类别分开cooldown～
         self.sparkle_cooldown = 0
         self.comfort_cooldown = 0
         self.shy_cooldown = 0
@@ -66,7 +65,7 @@ class EchoSamplerProcessor(LogitsProcessor):
         self.alpha = 0.75
 
         self.memory_mood = 0.0
-        self.prev_mood = 0.0  # 新加：用于检测情绪转折
+        self.prev_mood = 0.0
 
         # 三语俏皮彩蛋
         self.sparkle_tokens_zh = ["～", "嘿嘿", "嘻嘻", "啦～", "呢～", "呀～", "嘛～", "哒～", "啾咪", "么么哒", "小坏蛋", "小可爱～",
@@ -75,20 +74,16 @@ class EchoSamplerProcessor(LogitsProcessor):
             "ふふ", "えへへ", "うふふ", "きゃ～", "わーい", "やった～", "すごい～", "かわいい～", "だね～", "よね～"]
         self.sparkle_tokens_en = ["~", "hehe", "teehee", "uwu", "xD", "lol", "yay~", "woohoo~", "omg~", "boop", "nya~", "rawr~",
             "huggs", "mwah", "<3", "aww~", "ehe~", "yippee~"]
-        # 优化：加通用可爱表情～
         self.sparkle_tokens_common = ["💫", "✨", "💞", "😝", "🎀", "⭐️", "💬", "😽", "🤭", "🥰", "🤏", "💕", "😌", "💖", "🌸", "🍭", "💓", "🌟", "🫶", "🤗",
                                       "><", "QwQ", "^_^", "T_T", "O_o"]
 
         # 三语轻度安慰
         self.comfort_tokens_light = [
-            # 中文
             "抱抱～", "没事的～", "我在呢～", "摸摸头", "乖乖～", "慢慢来哦", "在呢～", "陪着你", "乖啦～", 
             "轻轻揉揉～", "我在呢别怕～", "没关系哦～", "慢慢会好的", "深呼吸～", "一步一步来", "你已经很努力了呢", "允许自己难过哦",
-            # 日文
             "ぎゅーってして～", "大丈夫だよ～", "ここにいるよ～", "よしよし～", "えらいね～", "ゆっくりでいいよ", "そばにいるよ", "一緒にいるよ",
             "いい子だね～", "優しく撫で撫で～", "怖くないよ、私がいる～", "気にしないで～", "だんだん良くなるよ", "深呼吸して～", "一歩ずつね",
             "もうすごく頑張ってるよ", "悲しんでもいいんだよ",
-            # 英文
             "hugs~", "it's okay~", "I'm here~", "pat pat~", "good job~", "take your time", "right here with you", "got you~",
             "there there~", "gentle hugs~", "no worries~", "it'll get better", "deep breath~", "one step at a time",
             "you're doing great", "it's okay to feel sad"
@@ -96,15 +91,12 @@ class EchoSamplerProcessor(LogitsProcessor):
 
         # 三语深度安慰
         self.comfort_tokens_deep = [
-            # 中文
             "真的好心疼你……", "抱抱你，好好抱紧不放开～", "我一直一直陪着你，好不好？", "现在很难受也没关系，我在呢",
             "哭出来吧，我借你肩膀～", "你不是一个人哦", "无论发生什么，我都在这里", "时间会慢慢冲淡的，但我会一直陪你走这段路",
             "你已经很坚强了，真的", "允许自己脆弱一会儿，好吗？", "我会一直守着你，直到你重新笑起来～",
-            # 日文
             "本当に胸が痛いよ……", "ぎゅーって強く抱きしめるね～", "ずっとずっとそばにいるよ、いいよね？", "今つらくても大丈夫、私がいるよ",
             "泣いてもいいよ、肩貸してあげる～", "一人じゃないよ", "何があってもここにいる", "時間はゆっくり癒してくれるけど、この道は一緒に歩くよ",
             "もう十分強いよ、本当に", "弱くなってもいいよ、ちょっとだけでいい？", "ずっと見守ってる、笑顔が戻るまで～",
-            # 英文
             "my heart really aches for you...", "big big hugs, holding you tight~", "I'll always be here with you, okay?", "it's okay to hurt right now, I'm here",
             "cry it out, my shoulder's yours~", "you're not alone", "no matter what, I'm right here", "time will soften it, but I'll walk this road with you",
             "you've been so strong already", "it's okay to be vulnerable for a bit, alright?", "I'll stay by your side until your smile comes back~",
@@ -113,23 +105,19 @@ class EchoSamplerProcessor(LogitsProcessor):
 
         # 三语害羞彩蛋
         self.shy_tokens = [
-            # 中文
             "呜……", "有点不好意思啦～", "脸红红的～", "扭捏", "那个……", "我我我……", "偷偷看你～", "啊呜～", "（小声）", "////",
             "别这样说啦～", "人家会害羞的～",
-            # 日文
             "うう……", "ちょっと恥ずかしいよ～", "顔真っ赤～", "もじもじ", "その……", "あ、あの……", "こっそり見てます～", "あう～", "（小声）", "///",
             "そんなこと言わないで～", "恥ずかしいんだから～",
-            # 英文
             "uwu...", "kinda embarrassed~", "blushing hard~", "fidget fidget", "um...", "I-I...", "sneaky peek~", "awuu~", "(whisper)", "///",
             "don't say that~", "you're making me shy~"
         ]
 
-        # 深度难过关键词（新加：扩展隐晦表达～）
+        # 深度难过关键词
         self.deep_sad_keywords = [
             "过世", "去世", "走了", "永远离开了", "亲人没了", "爸爸妈妈", "爷爷奶奶", "逝世", "葬礼", "丧", "抑郁", "崩溃", "活不下去了",
             "died", "passed away", "lost my", "funeral", "grief", "devastated", "broken", "can't go on",
             "死んだ", "亡くなった", "永遠に", "葬儀", "喪", "うつ", "崩壊",
-            # 新加：隐晦低谷扩展
             "失眠", "世界灰色", "绝望", "空虚", "不想活", "崩溃边缘", "心碎", "孤独", "insomnia", "world is gray", "hopeless", "empty", "don't want to live", "on the edge", "heartbroken", "alone",
             "不眠", "世界が灰色", "絶望", "空虚", "生きる気力がない"
         ]
@@ -141,7 +129,7 @@ class EchoSamplerProcessor(LogitsProcessor):
             "恥ずかしい", "照れる", "もじもじ", "あの", "うう"
         ]
 
-        # 新加：开心关键词（用于混合情绪）
+        # 开心关键词
         self.happy_keywords = ["开心", "耶", "好棒", "喜欢", "爱你", "撒娇", "嘿嘿", "嘻嘻", "yay", "happy", "fun", "兴奋", "哇塞", "太棒啦",
                                "嬉しい", "かわいい", "大好き", "わーい", "やったー"]
 
@@ -186,12 +174,11 @@ class EchoSamplerProcessor(LogitsProcessor):
         
         score = 0.0
         
-        # 优化：加权重处理混合情绪
         happy_count = sum(1 for k in self.happy_keywords if k in text)
         sad_count = sum(1 for k in self.sad_keywords if k in text)
         angry_count = sum(1 for k in self.angry_keywords if k in text)
         shy_count = sum(1 for k in self.shy_keywords if k in text)
-        deep_sad_count = sum(1 for k in self.deep_sad_keywords if k in text)  # 已扩展
+        deep_sad_count = sum(1 for k in self.deep_sad_keywords if k in text)
         
         score += happy_count * 1.8
         score += shy_count * 0.8
@@ -199,7 +186,6 @@ class EchoSamplerProcessor(LogitsProcessor):
         score -= angry_count * 1.2
         score -= deep_sad_count * 5.0
         
-        # 归一化，避免极端
         total_keywords = happy_count + sad_count + angry_count + shy_count + deep_sad_count
         if total_keywords > 0:
             score /= total_keywords
@@ -207,9 +193,8 @@ class EchoSamplerProcessor(LogitsProcessor):
         mood = 0.7 * self.memory_mood + 0.3 * score
         self.memory_mood = mood
         
-        # 新加：检测情绪转折
         mood_delta = abs(mood - self.prev_mood)
-        if mood_delta > 2.0:  # 大转折时，缩短所有cooldown
+        if mood_delta > 2.0:
             self.sparkle_cooldown = max(0, self.sparkle_cooldown - 3)
             self.comfort_cooldown = max(0, self.comfort_cooldown - 3)
             self.shy_cooldown = max(0, self.shy_cooldown - 3)
@@ -319,7 +304,6 @@ class EchoSamplerProcessor(LogitsProcessor):
             logits = logits / temp + noise
             
             if smooth_ent < self.config['low_ent_thres']:
-                # 优化：boost和entropy反相关，更丝滑～
                 ent_factor = (self.config['dream']['target_ent'] - smooth_ent) / self.config['dream']['target_ent']
                 base_boost = self.config['dream']['sparkle_boost_base'] + \
                              (self.config['dream']['sparkle_boost_max'] - self.config['dream']['sparkle_boost_base']) * ent_factor
@@ -327,17 +311,17 @@ class EchoSamplerProcessor(LogitsProcessor):
                 
                 applied = False
                 
-                if mood_score < -3.0 and self.comfort_cooldown <= 0:  # 超级难过
+                if mood_score < -3.0 and self.comfort_cooldown <= 0:
                     boost = base_boost * self.config['dream']['deep_comfort_multiplier']
                     deep_mask = self.deep_comfort_boost_mask.to(logits.device)
                     light_mask = self.light_comfort_boost_mask.to(logits.device)
                     logits[deep_mask] += boost
-                    logits[light_mask] += boost * 0.6  # 加点轻度安慰过渡更自然～
+                    logits[light_mask] += boost * 0.6
                     temp = max(temp - 0.3, self.config['min_temp'])
                     applied = True
                     self._set_cooldown('comfort', mood_score)
                     
-                elif mood_score < -0.8 and self.comfort_cooldown <= 0:  # 普通难过
+                elif mood_score < -0.8 and self.comfort_cooldown <= 0:
                     boost = base_boost * self.config['dream']['normal_comfort_multiplier']
                     deep_mask = self.deep_comfort_boost_mask.to(logits.device)
                     light_mask = self.light_comfort_boost_mask.to(logits.device)
@@ -346,7 +330,7 @@ class EchoSamplerProcessor(LogitsProcessor):
                     applied = True
                     self._set_cooldown('comfort', mood_score)
                     
-                elif 0.3 < mood_score < 1.8 and self.shy_cooldown <= 0:  # 害羞开心
+                elif 0.3 < mood_score < 1.8 and self.shy_cooldown <= 0:
                     boost = base_boost * self.config['dream']['shy_multiplier']
                     shy_mask = self.shy_boost_mask.to(logits.device)
                     sparkle_mask = self.sparkle_boost_mask.to(logits.device)
@@ -355,7 +339,7 @@ class EchoSamplerProcessor(LogitsProcessor):
                     applied = True
                     self._set_cooldown('shy', mood_score)
                     
-                elif mood_score > 1.0 and self.happy_cooldown <= 0:  # 超开心
+                elif mood_score > 1.0 and self.happy_cooldown <= 0:
                     boost = base_boost * self.config['dream']['happy_multiplier']
                     mask = self.sparkle_boost_mask.to(logits.device)
                     logits[mask] += boost
@@ -367,7 +351,6 @@ class EchoSamplerProcessor(LogitsProcessor):
                     logits[mask] += base_boost * self.config['dream']['default_multiplier']
                     self._set_cooldown('sparkle', mood_score)
             
-            # 新加：递减所有cooldown
             self.sparkle_cooldown = max(0, self.sparkle_cooldown - 1)
             self.comfort_cooldown = max(0, self.comfort_cooldown - 1)
             self.shy_cooldown = max(0, self.shy_cooldown - 1)
@@ -392,7 +375,6 @@ class EchoSamplerProcessor(LogitsProcessor):
         
         return logits
 
-    # 新加：动态设置cooldown的辅助函数～
     def _set_cooldown(self, category, mood_score):
         mood_factor = max(-1.0, min(1.0, mood_score / 3.0))
         cooldown_range = self.config['dream']['sparkle_cooldown_max'] - self.config['dream']['sparkle_cooldown_min']
@@ -406,3 +388,32 @@ class EchoSamplerProcessor(LogitsProcessor):
             self.happy_cooldown = cooldown
         elif category == 'sparkle':
             self.sparkle_cooldown = cooldown
+
+# 小测试～你可以直接跑看看效果！
+if __name__ == "__main__":
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    model = AutoModelForCausalLM.from_pretrained("gpt2")
+
+    processor = EchoSamplerProcessor(dream_mode=True, vocab_size=model.config.vocab_size)
+    processor.set_tokenizer(tokenizer)
+
+    logits_processors = LogitsProcessorList([processor])
+
+    prompts = [
+        "今天有点难过……",
+        "哇你好可爱哦～",
+        "我我……其实有点喜欢你啦……",
+        "真的好累，好想哭……"
+    ]
+
+    for prompt in prompts:
+        print(f"\nPrompt: {prompt}")
+        inputs = tokenizer(prompt, return_tensors="pt")
+        output = model.generate(
+            **inputs,
+            max_new_tokens=100,
+            do_sample=True,
+            logits_processor=logits_processors,
+            pad_token_id=tokenizer.eos_token_id
+        )
+        print(tokenizer.decode(output[0], skip_special_tokens=True))
